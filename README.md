@@ -2,6 +2,8 @@
 
 高性能 Windows 内存优化工具，采用 Rust 内核 + Python CustomTkinter UI 架构。
 
+友情链接：<a href="https://linux.do/">Linuxdo</a>
+
 ## 功能特性
 
 - **实时监控** — 物理内存占用、系统缓存、60 秒趋势图
