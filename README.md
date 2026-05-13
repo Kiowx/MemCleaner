@@ -1,8 +1,8 @@
 # MemCleaner
 
-<img width="1354" height="977" alt="QQ_1778663054058" src="https://github.com/user-attachments/assets/4156d4f7-1e0e-41c1-81a8-18a20bc308df" />
-
 高性能 Windows 内存优化工具，采用 Rust 内核 + Python CustomTkinter UI 架构。
+
+<img width="1354" height="977" alt="QQ_1778663054058" src="https://github.com/user-attachments/assets/4156d4f7-1e0e-41c1-81a8-18a20bc308df" />
 
 ## 功能特性
 
