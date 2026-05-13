@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "memcleaner"
+version = "0.1.0"
+description = "A modern Windows memory cleaner with a Rust core and CustomTkinter UI."
+requires-python = ">=3.10"
+dependencies = [
+    "customtkinter>=5.2.0",
+    "Pillow>=10.0.0",
+    "pystray>=0.19.5",
+]
+
+[project.scripts]
+memcleaner = "memcleaner.__main__:main"
+
+[tool.maturin]
+module-name = "memcleaner._core"
+python-source = "."
+features = ["pyo3/extension-module"]
