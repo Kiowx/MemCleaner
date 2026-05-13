@@ -2,8 +2,6 @@
 
 高性能 Windows 内存优化工具，采用 Rust 内核 + Python CustomTkinter UI 架构。
 
-<img width="1354" height="977" alt="QQ_1778663054058" src="https://github.com/user-attachments/assets/4156d4f7-1e0e-41c1-81a8-18a20bc308df" />
-
 ## 功能特性
 
 - **实时监控** — 物理内存占用、系统缓存、60 秒趋势图
@@ -20,6 +18,8 @@
 - **深色 / 浅色主题**
 - **中 / 英双语界面**
 - **HiDPI 支持**
+
+<img width="1354" height="977" alt="QQ_1778663054058" src="https://github.com/user-attachments/assets/4156d4f7-1e0e-41c1-81a8-18a20bc308df" />
 
 ## 架构
 
