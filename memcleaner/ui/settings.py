@@ -109,6 +109,56 @@ class SettingsPage(ctk.CTkFrame):
         )
         self.slider.grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
+        seconds_row = ctk.CTkFrame(card.body, fg_color="transparent")
+        seconds_row.pack(fill="x", pady=(10, 0))
+        seconds_row.grid_columnconfigure(1, weight=1)
+        seconds_row.grid_columnconfigure(3, weight=1)
+        self.threshold_trigger_lbl = ctk.CTkLabel(
+            seconds_row,
+            text=t("settings.threshold_trigger_seconds"),
+            text_color=T.TEXT_DIM,
+            font=(T.FONT_FAMILY, 11),
+        )
+        self.threshold_trigger_lbl.grid(row=0, column=0, sticky="w")
+        self.threshold_trigger_entry = ctk.CTkEntry(
+            seconds_row,
+            width=74,
+            height=28,
+            fg_color=T.SURFACE_2,
+            border_color=T.SURFACE_3,
+            text_color=T.TEXT,
+        )
+        self.threshold_trigger_entry.grid(row=0, column=1, sticky="w", padx=(8, 18))
+        self.threshold_trigger_entry.bind("<FocusOut>", self._on_threshold_trigger_value)
+        self.threshold_trigger_entry.bind("<Return>", self._on_threshold_trigger_value)
+        self.threshold_trigger_entry.bind(
+            "<KeyRelease>",
+            lambda _e: self._validate_int_entry(self.threshold_trigger_entry, 0, 300),
+        )
+
+        self.threshold_cooldown_lbl = ctk.CTkLabel(
+            seconds_row,
+            text=t("settings.threshold_seconds"),
+            text_color=T.TEXT_DIM,
+            font=(T.FONT_FAMILY, 11),
+        )
+        self.threshold_cooldown_lbl.grid(row=0, column=2, sticky="w")
+        self.threshold_cooldown_entry = ctk.CTkEntry(
+            seconds_row,
+            width=74,
+            height=28,
+            fg_color=T.SURFACE_2,
+            border_color=T.SURFACE_3,
+            text_color=T.TEXT,
+        )
+        self.threshold_cooldown_entry.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.threshold_cooldown_entry.bind("<FocusOut>", self._on_threshold_cooldown_value)
+        self.threshold_cooldown_entry.bind("<Return>", self._on_threshold_cooldown_value)
+        self.threshold_cooldown_entry.bind(
+            "<KeyRelease>",
+            lambda _e: self._validate_int_entry(self.threshold_cooldown_entry, 5, 3600),
+        )
+
         # ---- Card: 定时 -----------------------------------------------
         card2 = Card(body, "settings.interval_card"); self._cards.append(card2)
         card2.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
@@ -329,6 +379,16 @@ class SettingsPage(ctk.CTkFrame):
         )
         self.sw_autostart.grid(row=0, column=1, sticky="e")
 
+        r5 = ctk.CTkFrame(card4.body, fg_color="transparent")
+        r5.pack(fill="x", pady=(10, 6)); r5.grid_columnconfigure(0, weight=1)
+        row = Row(r5, "settings.auto_elevate_label", "settings.auto_elevate_hint")
+        self._rows.append(row); row.grid(row=0, column=0, sticky="ew")
+        self.sw_auto_elevate = ctk.CTkSwitch(
+            r5, text="", command=self._on_auto_elevate_toggle,
+            progress_color=T.ACCENT, button_color=T.TEXT,
+        )
+        self.sw_auto_elevate.grid(row=0, column=1, sticky="e")
+
         # ---- About -----------------------------------------------------
         about = Card(body, "settings.about_card"); self._cards.append(about)
         about.grid(row=4, column=0, sticky="ew", padx=4, pady=(10, 4))
@@ -349,6 +409,10 @@ class SettingsPage(ctk.CTkFrame):
         (self.sw_threshold.select if c.threshold_enabled else self.sw_threshold.deselect)()
         self.slider.set(c.threshold_percent)
         self._update_threshold_label()
+        self.threshold_trigger_entry.delete(0, "end")
+        self.threshold_trigger_entry.insert(0, str(c.threshold_trigger_seconds))
+        self.threshold_cooldown_entry.delete(0, "end")
+        self.threshold_cooldown_entry.insert(0, str(c.threshold_cooldown_seconds))
 
         (self.sw_interval.select if c.interval_enabled else self.sw_interval.deselect)()
         self.interval_entry.delete(0, "end")
@@ -359,6 +423,7 @@ class SettingsPage(ctk.CTkFrame):
         self.excluded_names_entry.insert(0, c.excluded_process_names)
         (self.sw_tray.select if c.tray_enabled else self.sw_tray.deselect)()
         (self.sw_autostart.select if c.autostart else self.sw_autostart.deselect)()
+        (self.sw_auto_elevate.select if c.auto_elevate else self.sw_auto_elevate.deselect)()
 
         # Disconnect callbacks before .set() to prevent re-entrancy
         self.cleaning_mode_seg.configure(command=None)
@@ -397,16 +462,19 @@ class SettingsPage(ctk.CTkFrame):
         )
 
     def _on_interval_keyrelease(self, _evt=None) -> None:
-        text = self.interval_entry.get().strip()
+        self._validate_int_entry(self.interval_entry, 1, 1440)
+
+    def _validate_int_entry(self, entry: ctk.CTkEntry, low: int, high: int) -> None:
+        text = entry.get().strip()
         if not text:
-            self.interval_entry.configure(border_color=T.SURFACE_3)
+            entry.configure(border_color=T.SURFACE_3)
             return
         try:
             v = int(text)
-            valid = 1 <= v <= 1440
+            valid = low <= v <= high
         except ValueError:
             valid = False
-        self.interval_entry.configure(border_color=T.SURFACE_3 if valid else T.DANGER)
+        entry.configure(border_color=T.SURFACE_3 if valid else T.DANGER)
 
     def _on_threshold_toggle(self) -> None:
         self._cfg.threshold_enabled = bool(self.sw_threshold.get())
@@ -416,6 +484,30 @@ class SettingsPage(ctk.CTkFrame):
         self._cfg.threshold_percent = int(round(float(value)))
         self._update_threshold_label()
         self._save_config_debounced()
+
+    def _on_threshold_trigger_value(self, _evt=None) -> None:
+        try:
+            value = int(self.threshold_trigger_entry.get().strip())
+        except ValueError:
+            value = self._cfg.threshold_trigger_seconds
+        value = max(0, min(300, value))
+        self._cfg.threshold_trigger_seconds = value
+        self.threshold_trigger_entry.delete(0, "end")
+        self.threshold_trigger_entry.insert(0, str(value))
+        self.threshold_trigger_entry.configure(border_color=T.SURFACE_3)
+        self._app.save_config()
+
+    def _on_threshold_cooldown_value(self, _evt=None) -> None:
+        try:
+            value = int(self.threshold_cooldown_entry.get().strip())
+        except ValueError:
+            value = self._cfg.threshold_cooldown_seconds
+        value = max(5, min(3600, value))
+        self._cfg.threshold_cooldown_seconds = value
+        self.threshold_cooldown_entry.delete(0, "end")
+        self.threshold_cooldown_entry.insert(0, str(value))
+        self.threshold_cooldown_entry.configure(border_color=T.SURFACE_3)
+        self._app.save_config()
 
     def _save_config_debounced(self) -> None:
         if self._threshold_save_after_id is not None:
@@ -574,6 +666,13 @@ class SettingsPage(ctk.CTkFrame):
         self._cfg.autostart = desired
         self._app.save_config()
 
+    def _on_auto_elevate_toggle(self) -> None:
+        desired = bool(self.sw_auto_elevate.get())
+        self._cfg.auto_elevate = desired
+        self._app.save_config()
+        if desired and not self._app._is_admin():
+            self._app.show_toast(t("toast.auto_elevate_next_start"), "info")
+
     def _on_theme_change(self, value: str) -> None:
         # Use config value instead of display string to avoid i18n mismatch
         vals = list(self.theme_seg.cget("values"))
@@ -606,6 +705,14 @@ class SettingsPage(ctk.CTkFrame):
             if row.hint is not None:
                 row.hint.configure(text_color=T.TEXT_MUTED)
         self.threshold_label.configure(text_color=T.TEXT_DIM)
+        self.threshold_trigger_lbl.configure(text_color=T.TEXT_DIM)
+        self.threshold_cooldown_lbl.configure(text_color=T.TEXT_DIM)
+        for entry in (self.threshold_trigger_entry, self.threshold_cooldown_entry):
+            entry.configure(
+                fg_color=T.SURFACE_2,
+                border_color=T.SURFACE_3,
+                text_color=T.TEXT,
+            )
         self.interval_lbl.configure(text_color=T.TEXT_DIM)
         self.cleaning_mode_desc.configure(text_color=T.TEXT_DIM)
         for label, value in self._strategy_labels.values():
@@ -633,6 +740,7 @@ class SettingsPage(ctk.CTkFrame):
             self.sw_exclude_foreground,
             self.sw_tray,
             self.sw_autostart,
+            self.sw_auto_elevate,
         ):
             switch.configure(progress_color=T.ACCENT, button_color=T.TEXT)
         for seg in (self.cleaning_mode_seg, self.theme_seg, self.lang_seg, self.mode_seg):
@@ -658,6 +766,8 @@ class SettingsPage(ctk.CTkFrame):
         for r in self._rows:
             r.refresh_language()
         self.interval_lbl.configure(text=t("settings.interval_minutes"))
+        self.threshold_trigger_lbl.configure(text=t("settings.threshold_trigger_seconds"))
+        self.threshold_cooldown_lbl.configure(text=t("settings.threshold_seconds"))
         self._update_threshold_label()
         self.cleaning_mode_seg.configure(
             values=[

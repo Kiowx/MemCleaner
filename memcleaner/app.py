@@ -884,7 +884,7 @@ class App(ctk.CTk):
                 key = "toast.cleaned_with_standby_ok" if standby_ok else "toast.cleaned_with_standby_fail"
             else:
                 key = "toast.cleaned"
-            msg = tn(key, count, freed=f"{freed:.0f}")
+            msg = self._format_clean_message(key, count, result)
             self._post(lambda m=msg: self.show_toast(m, "info"))
             self._post(lambda r=result: self._get_page("dashboard").set_last_clean(r))
             if on_done:
@@ -916,6 +916,18 @@ class App(ctk.CTk):
                 self._post(on_done)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _format_clean_message(self, key: str, count: int, result: dict) -> str:
+        freed = float(result.get("freed_mb", 0.0))
+        msg = tn(key, count, freed=f"{freed:.0f}")
+        process_freed = float(result.get("process_freed_mb", 0.0))
+        system_freed = float(result.get("system_freed_mb", 0.0))
+        if process_freed > 0.5 or system_freed > 0.5:
+            msg = (
+                f"{msg}\n"
+                f"{t('toast.clean_breakdown', process=f'{process_freed:.0f}', system=f'{system_freed:.0f}')}"
+            )
+        return msg
 
     def trim_pid(self, pid: int) -> None:
         def work():
@@ -1339,7 +1351,7 @@ class App(ctk.CTk):
         freed = result.get("freed_mb", 0.0)
         count = result.get("trimmed", 0)
         key = "toast.threshold_trigger" if trigger == "threshold" else "toast.interval_trigger"
-        self.show_toast(tn(key, count, freed=f"{freed:.0f}"), "info")
+        self.show_toast(self._format_clean_message(key, count, result), "info")
         self._get_page("dashboard").set_last_clean(result)
 
     # ---- 关闭 ----------------------------------------------------------

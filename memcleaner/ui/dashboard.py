@@ -8,6 +8,7 @@ import tkinter as tk
 from typing import List, Optional
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw, ImageTk
 
 from .. import theme as T
 from ..i18n import t
@@ -20,6 +21,7 @@ class DonutGauge(tk.Canvas):
     THICKNESS = 22
     TWEEN_MS = 280
     TWEEN_STEP_MS = 16
+    RENDER_SCALE = 4
 
     def __init__(self, master) -> None:
         super().__init__(
@@ -37,6 +39,9 @@ class DonutGauge(tk.Canvas):
         self._step = 0.0
         self._tween_running: bool = False
         self._tween_after_id: Optional[str] = None
+        self._ring_photo: Optional[ImageTk.PhotoImage] = None
+        self._track_image: Optional[Image.Image] = None
+        self._track_key: Optional[tuple] = None
         self._draw()
 
     def set_percent(self, percent: float, used_text: str = "") -> None:
@@ -85,32 +90,15 @@ class DonutGauge(tk.Canvas):
 
     def refresh_theme(self) -> None:
         self.configure(bg=T.color(T.SURFACE))
+        self._track_image = None
+        self._track_key = None
         self._draw()
 
     def _draw(self) -> None:
         self.delete("all")
         s = self.SIZE
-        thick = self.THICKNESS
-        pad = thick // 2 + 4
-        x0, y0, x1, y1 = pad, pad, s - pad, s - pad
-
-        track = T.color(T.SURFACE_2)
-        fg = T.percent_color(self._displayed)
-
-        self.create_arc(
-            x0, y0, x1, y1,
-            start=0, extent=359.999,
-            style="arc", outline=track, width=thick,
-        )
-
-        if self._displayed > 0.0:
-            extent = -self._displayed * 3.6
-            extent = max(-359.99, min(-0.01, extent))
-            self.create_arc(
-                x0, y0, x1, y1,
-                start=90, extent=extent,
-                style="arc", outline=fg, width=thick,
-            )
+        self._ring_photo = ImageTk.PhotoImage(self._make_ring_image(), master=self)
+        self.create_image(0, 0, image=self._ring_photo, anchor="nw")
 
         self.create_text(
             s // 2, s // 2 - 10,
@@ -125,6 +113,38 @@ class DonutGauge(tk.Canvas):
                 fill=T.color(T.TEXT_DIM),
                 font=(T.FONT_FAMILY, 11),
             )
+
+    def _make_ring_image(self) -> Image.Image:
+        scale = self.RENDER_SCALE
+        s = self.SIZE
+        hi_s = s * scale
+        thick = self.THICKNESS * scale
+        pad = (self.THICKNESS // 2 + 4) * scale
+        bbox = [pad, pad, hi_s - pad, hi_s - pad]
+        fg = T.percent_color(self._displayed)
+        img = self._make_track_image(hi_s, thick, bbox).copy()
+        draw = ImageDraw.Draw(img)
+
+        if self._displayed > 0.0:
+            sweep = max(0.01, min(359.99, self._displayed * 3.6))
+            start = -90.0
+            end = start + sweep
+            draw.arc(bbox, start=start, end=end, fill=fg, width=thick)
+
+        return img.resize((s, s), Image.Resampling.LANCZOS)
+
+    def _make_track_image(self, hi_s: int, thick: int, bbox: list[int]) -> Image.Image:
+        bg = T.color(T.SURFACE)
+        track = T.color(T.SURFACE_2)
+        key = (hi_s, thick, tuple(bbox), bg, track)
+        if self._track_image is not None and self._track_key == key:
+            return self._track_image
+        img = Image.new("RGBA", (hi_s, hi_s), bg)
+        draw = ImageDraw.Draw(img)
+        draw.ellipse(bbox, outline=track, width=thick)
+        self._track_image = img
+        self._track_key = key
+        return img
 
 
 class HistoryChart(tk.Canvas):
@@ -372,6 +392,8 @@ class DashboardPage(ctk.CTkFrame):
         self._app = app
         self._last_clean_at: Optional[float] = None
         self._last_clean_freed: float = 0.0
+        self._last_clean_process_freed: float = 0.0
+        self._last_clean_system_freed: float = 0.0
         self._cleaning = False
         self._standby_busy = False
         self._light_mode_initialized = False
@@ -540,6 +562,8 @@ class DashboardPage(ctk.CTkFrame):
     def set_last_clean(self, result: dict) -> None:
         self._last_clean_at = time.time()
         self._last_clean_freed = float(result.get("freed_mb", 0.0))
+        self._last_clean_process_freed = float(result.get("process_freed_mb", 0.0))
+        self._last_clean_system_freed = float(result.get("system_freed_mb", 0.0))
         self._refresh_last_clean()
 
     def _refresh_last_clean(self) -> None:
@@ -548,6 +572,17 @@ class DashboardPage(ctk.CTkFrame):
             return
         elapsed = int(time.time() - self._last_clean_at)
         ago = T.fmt_ago(elapsed)
+        if self._last_clean_process_freed > 0.5 or self._last_clean_system_freed > 0.5:
+            self.last_clean_label.configure(
+                text=t(
+                    "dashboard.last_clean_detail",
+                    freed=f"{self._last_clean_freed:.0f}",
+                    process=f"{self._last_clean_process_freed:.0f}",
+                    system=f"{self._last_clean_system_freed:.0f}",
+                    ago=ago,
+                )
+            )
+            return
         self.last_clean_label.configure(
             text=t(
                 "dashboard.last_clean",
@@ -602,5 +637,7 @@ class DashboardPage(ctk.CTkFrame):
         ):
             self._last_clean_at = None
             self._last_clean_freed = 0.0
+            self._last_clean_process_freed = 0.0
+            self._last_clean_system_freed = 0.0
             self._light_mode_initialized = True
         self._refresh_last_clean()
