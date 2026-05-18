@@ -422,8 +422,14 @@ type NtSetSystemInformationFn = unsafe extern "system" fn(
 fn nt_set_system_information() -> Option<NtSetSystemInformationFn> {
     unsafe {
         let module = GetModuleHandleW(w!("ntdll.dll")).ok()?;
-        let proc = GetProcAddress(module, windows::core::PCSTR(b"NtSetSystemInformation\0".as_ptr()))?;
-        Some(std::mem::transmute(proc))
+        let proc = GetProcAddress(
+            module,
+            windows::core::PCSTR(c"NtSetSystemInformation".as_ptr().cast()),
+        )?;
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            NtSetSystemInformationFn,
+        >(proc))
     }
 }
 
@@ -736,7 +742,7 @@ fn tray_icon_path() -> Option<PathBuf> {
     }
 
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(current) = env::current_exe().ok() {
+    if let Ok(current) = env::current_exe() {
         if let Some(parent) = current.parent() {
             candidates.push(parent.join("memcleaner.ico"));
             candidates.push(parent.join("assets").join("memcleaner.ico"));
@@ -854,7 +860,7 @@ fn add_tray_icon(hwnd: HWND) -> bool {
     };
     nid.hIcon = load_tray_icon();
     fill_tray_tip(&mut nid, &current_usage_tooltip());
-    unsafe { Shell_NotifyIconW(NIM_ADD, &mut nid).as_bool() }
+    unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() }
 }
 
 fn update_tray_tooltip(hwnd: HWND) {
@@ -867,7 +873,7 @@ fn update_tray_tooltip(hwnd: HWND) {
     };
     fill_tray_tip(&mut nid, &current_usage_tooltip());
     unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &mut nid);
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
 
@@ -893,14 +899,14 @@ fn load_tray_icon() -> HICON {
 }
 
 fn delete_tray_icon(hwnd: HWND) {
-    let mut nid = NOTIFYICONDATAW {
+    let nid = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: TRAY_UID,
         ..Default::default()
     };
     unsafe {
-        let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 }
 

@@ -1,4 +1,5 @@
 #![cfg(windows)]
+#![allow(clippy::useless_conversion)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -214,8 +215,11 @@ type NtQuerySystemInformationFn = unsafe extern "system" fn(
 fn nt_query_system_information() -> Option<NtQuerySystemInformationFn> {
     unsafe {
         let module = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
-        let proc = GetProcAddress(module, PCSTR(b"NtQuerySystemInformation\0".as_ptr()))?;
-        Some(std::mem::transmute::<_, NtQuerySystemInformationFn>(proc))
+        let proc = GetProcAddress(module, PCSTR(c"NtQuerySystemInformation".as_ptr().cast()))?;
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            NtQuerySystemInformationFn,
+        >(proc))
     }
 }
 
@@ -367,8 +371,7 @@ fn process_list(py: Python<'_>) -> PyResult<PyObject> {
         return process_list_fallback(py);
     }
 
-    let mut buffer = Vec::<u8>::with_capacity(needed as usize);
-    buffer.resize(needed as usize, 0);
+    let mut buffer = vec![0; needed as usize];
     let status = unsafe {
         nt_query(
             SYSTEM_PROCESS_INFORMATION_CLASS,
@@ -458,7 +461,7 @@ fn trim_process(pid: u32) -> bool {
 /// 而是在清理前后测量全局可用内存，从而得到真实释放量。
 #[pyfunction]
 fn trim_all(py: Python<'_>) -> PyResult<PyObject> {
-    trim_all_filtered(py, false, "", "aggressive", false)
+    trim_all_filtered(py, false, "", "balanced", false)
 }
 
 #[pyfunction]
@@ -676,8 +679,11 @@ type NtSetSystemInformationFn = unsafe extern "system" fn(
 fn nt_set_system_information() -> Option<NtSetSystemInformationFn> {
     unsafe {
         let module = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
-        let proc = GetProcAddress(module, PCSTR(b"NtSetSystemInformation\0".as_ptr()))?;
-        Some(std::mem::transmute::<_, NtSetSystemInformationFn>(proc))
+        let proc = GetProcAddress(module, PCSTR(c"NtSetSystemInformation".as_ptr().cast()))?;
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            NtSetSystemInformationFn,
+        >(proc))
     }
 }
 
