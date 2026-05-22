@@ -351,6 +351,14 @@ fn process_list_fallback(py: Python<'_>) -> PyResult<PyObject> {
 
 #[pyfunction]
 fn process_list(py: Python<'_>) -> PyResult<PyObject> {
+    // Win11 上不同补丁版本的 SYSTEM_PROCESS_INFORMATION 布局和字符串指针
+    // 偶发会让手写解析路径触发原生崩溃。进程页更需要稳定性，
+    // 这里统一使用 ToolHelp + GetProcessMemoryInfo 的保守实现。
+    process_list_fallback(py)
+}
+
+#[allow(dead_code)]
+fn process_list_ntquery(py: Python<'_>) -> PyResult<PyObject> {
     let nt_query = match nt_query_system_information() {
         Some(f) => f,
         None => return process_list_fallback(py),
