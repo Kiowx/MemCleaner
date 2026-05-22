@@ -524,6 +524,27 @@ class ProcessesPage(ctk.CTkFrame):
         else:  # 工作集
             self._procs.sort(key=lambda p: p.get("working_set", 0), reverse=rev)
 
+    @staticmethod
+    def _normalize_proc(raw: object) -> Optional[dict]:
+        """把底层返回的进程数据收敛成渲染层可安全使用的格式。"""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            pid = int(raw.get("pid", 0))
+            ws = int(raw.get("working_set", 0))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if pid <= 0:
+            return None
+        name = raw.get("name", "")
+        if not isinstance(name, str):
+            name = str(name) if name is not None else ""
+        return {
+            "pid": pid,
+            "name": name.strip() or f"PID {pid}",
+            "working_set": max(0, ws),
+        }
+
     def set_total_memory(self, total_bytes: int) -> None:
         total = max(1, int(total_bytes))
         if total == self._total_mem:
@@ -548,7 +569,11 @@ class ProcessesPage(ctk.CTkFrame):
         def work():
             try:
                 procs = list(_core.process_list())
-            except OSError:
+            except Exception:
+                try:
+                    self._app._logger.debug("process list fetch failed", exc_info=True)
+                except Exception:
+                    pass
                 procs = []
             scheduled = self._app.safe_after(0, lambda p=procs: self._on_fetched(p))
             if scheduled is None:
@@ -561,7 +586,8 @@ class ProcessesPage(ctk.CTkFrame):
 
     def _on_fetched(self, procs: List[dict]) -> None:
         try:
-            self._procs = procs
+            normalized = [self._normalize_proc(p) for p in procs]
+            self._procs = [p for p in normalized if p is not None]
             self._has_data = True
             self._sort_in_place()
             if self._active:
