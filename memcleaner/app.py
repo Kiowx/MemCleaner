@@ -825,6 +825,8 @@ class App(ctk.CTk):
                     callback()
             except tk.TclError:
                 pass
+            except Exception:
+                self._logger.debug("scheduled callback failed", exc_info=True)
 
         try:
             return self.after(delay_ms, guarded)
