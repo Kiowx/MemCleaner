@@ -134,13 +134,20 @@ class Tray:
             pystray.MenuItem(t("tray.quit"), self._fire_quit),
         )
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 1.5) -> None:
         if self._icon is not None:
             try:
                 self._icon.stop()
             except Exception:
-                pass
+                self._logger.debug("tray stop failed", exc_info=True)
             self._icon = None
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join(timeout=timeout)
+        self._thread = None
 
     # ---- 内部回调 ------------------------------------------------------
 

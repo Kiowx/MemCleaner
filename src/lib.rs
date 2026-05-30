@@ -8,28 +8,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use windows::core::PCSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
-use windows::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::ProcessStatus::{
-    EmptyWorkingSet, GetPerformanceInfo, GetProcessMemoryInfo, PERFORMANCE_INFORMATION,
-    PROCESS_MEMORY_COUNTERS,
-};
+use windows::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 #[allow(dead_code)]
 mod cleaning;
+mod winmem;
 
 // ----- RAII 句柄守卫 ------------------------------------------------------
 
@@ -51,10 +42,6 @@ impl Drop for OwnedHandle {
 
 const SYSTEM_PROCESS_INFORMATION_CLASS: i32 = 5;
 const SYSTEM_MEMORY_LIST_INFORMATION_CLASS: i32 = 80;
-const SYSTEM_FILE_CACHE_INFORMATION_EX_CLASS: i32 = 81;
-const MEMORY_EMPTY_WORKING_SETS: u32 = 2;
-const MEMORY_FLUSH_MODIFIED_LIST: u32 = 3;
-const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
 
 #[repr(C)]
 struct UnicodeString {
@@ -113,20 +100,6 @@ struct MemoryListInformation {
     page_count_by_priority: [usize; 8],
     repurposed_pages_by_priority: [usize; 8],
     modified_page_count_page_file: usize,
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct SystemFileCacheInformation {
-    current_size: usize,
-    peak_size: usize,
-    page_fault_count: u32,
-    minimum_working_set: usize,
-    maximum_working_set: usize,
-    current_size_including_transition_in_pages: usize,
-    peak_size_including_transition_in_pages: usize,
-    transition_repurpose_count: u32,
-    flags: u32,
 }
 
 // ----- 辅助函数 -----------------------------------------------------------
@@ -429,33 +402,11 @@ fn process_list_ntquery(py: Python<'_>) -> PyResult<PyObject> {
 // ----- trim_process / trim_all -------------------------------------------
 
 fn working_set_for(pid: u32) -> Option<u64> {
-    unsafe {
-        let h = OwnedHandle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?);
-        working_set_for_handle(h.0)
-    }
-}
-
-fn working_set_for_handle(h: HANDLE) -> Option<u64> {
-    let mut counters = PROCESS_MEMORY_COUNTERS::default();
-    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    unsafe {
-        if GetProcessMemoryInfo(h, &mut counters, size).is_ok() {
-            Some(counters.WorkingSetSize as u64)
-        } else {
-            None
-        }
-    }
+    winmem::working_set_for(pid)
 }
 
 fn trim_pid(pid: u32) -> bool {
-    unsafe {
-        let h = match OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-        {
-            Ok(h) => OwnedHandle(h),
-            Err(_) => return false,
-        };
-        EmptyWorkingSet(h.0).is_ok()
-    }
+    winmem::trim_pid(pid)
 }
 
 #[pyfunction]
@@ -516,35 +467,26 @@ fn trim_all_filtered(
         Ok(())
     })?;
 
-    // 使用单个 OpenProcess 句柄清理每个候选进程。
     for (pid, display_name) in candidates {
-        unsafe {
-            let h = match OpenProcess(
-                PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                pid,
-            ) {
-                Ok(h) => OwnedHandle(h),
-                Err(_) => continue,
-            };
-            let before_ws = match working_set_for_handle(h.0) {
-                Some(ws) => ws,
-                None => continue,
-            };
-            if before_ws < min_ws {
-                continue;
-            }
-            let success = EmptyWorkingSet(h.0).is_ok();
-            let after_ws = if success {
-                working_set_for_handle(h.0).unwrap_or(before_ws)
-            } else {
-                before_ws
-            };
-            let freed = before_ws.saturating_sub(after_ws);
-            if success {
+        let before_ws = match working_set_for(pid) {
+            Some(ws) => ws,
+            None => continue,
+        };
+        if before_ws < min_ws {
+            continue;
+        }
+        if let Some(report) = winmem::trim_process_report(pid) {
+            if report.success {
                 trimmed_count += 1;
             }
-            reports.push((pid, display_name, before_ws, after_ws, freed, success));
+            reports.push((
+                pid,
+                display_name,
+                report.before_ws,
+                report.after_ws,
+                report.freed_ws,
+                report.success,
+            ));
         }
     }
 
@@ -638,36 +580,7 @@ fn trim_all_filtered(
 // ----- enable_privilege --------------------------------------------------
 
 fn enable_priv_internal(name: &str) -> bool {
-    unsafe {
-        let mut token = HANDLE::default();
-        let proc = GetCurrentProcess();
-        if OpenProcessToken(proc, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
-        let token = OwnedHandle(token);
-
-        let mut wide: Vec<u16> = name.encode_utf16().collect();
-        wide.push(0);
-        let mut luid = LUID::default();
-        if LookupPrivilegeValueW(
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR(wide.as_ptr()),
-            &mut luid,
-        )
-        .is_err()
-        {
-            return false;
-        }
-
-        let tp = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        AdjustTokenPrivileges(token.0, false, Some(&tp), 0, None, None).is_ok()
-    }
+    winmem::enable_privilege(name)
 }
 
 #[pyfunction]
@@ -677,127 +590,13 @@ fn enable_privilege(name: &str) -> bool {
 
 // ----- system cleanup -----------------------------------------------------
 
-#[allow(non_snake_case)]
-type NtSetSystemInformationFn = unsafe extern "system" fn(
-    SystemInformationClass: i32,
-    SystemInformation: *mut core::ffi::c_void,
-    SystemInformationLength: u32,
-) -> i32;
-
-fn nt_set_system_information() -> Option<NtSetSystemInformationFn> {
-    unsafe {
-        let module = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
-        let proc = GetProcAddress(module, PCSTR(c"NtSetSystemInformation".as_ptr().cast()))?;
-        Some(std::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
-            NtSetSystemInformationFn,
-        >(proc))
-    }
-}
-
-#[derive(Default)]
-struct SystemCleanReport {
-    system_working_set_cleared: bool,
-    system_working_set_freed_bytes: u64,
-    system_cache_cleared: bool,
-    system_cache_freed_bytes: u64,
-    modified_page_list_cleared: bool,
-    modified_page_list_freed_bytes: u64,
-    standby_cleared: bool,
-    standby_freed_bytes: u64,
-}
-
-impl SystemCleanReport {
-    fn total_freed(&self) -> u64 {
-        self.system_working_set_freed_bytes
-            .saturating_add(self.system_cache_freed_bytes)
-            .saturating_add(self.modified_page_list_freed_bytes)
-            .saturating_add(self.standby_freed_bytes)
-    }
-}
-
-fn measure_avail_delta(action: impl FnOnce() -> bool) -> (bool, u64) {
-    let before = get_avail_bytes();
-    let ok = action();
-    if !ok {
-        return (false, 0);
-    }
-    let after = get_avail_bytes();
-    (true, after.saturating_sub(before))
-}
-
-fn issue_memory_list_command(command: u32) -> bool {
-    let _ = enable_priv_internal("SeProfileSingleProcessPrivilege");
-    let f = match nt_set_system_information() {
-        Some(f) => f,
-        None => return false,
-    };
-    let mut command = command;
-    let status = unsafe {
-        f(
-            SYSTEM_MEMORY_LIST_INFORMATION_CLASS,
-            &mut command as *mut u32 as *mut _,
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
-    status == 0
-}
-
-fn clear_system_working_sets() -> bool {
-    issue_memory_list_command(MEMORY_EMPTY_WORKING_SETS)
-}
-
-fn clear_system_file_cache() -> bool {
-    let _ = enable_priv_internal("SeIncreaseQuotaPrivilege");
-    let f = match nt_set_system_information() {
-        Some(f) => f,
-        None => return false,
-    };
-    let mut info = SystemFileCacheInformation {
-        minimum_working_set: usize::MAX,
-        maximum_working_set: usize::MAX,
-        ..Default::default()
-    };
-    let status = unsafe {
-        f(
-            SYSTEM_FILE_CACHE_INFORMATION_EX_CLASS,
-            &mut info as *mut SystemFileCacheInformation as *mut _,
-            std::mem::size_of::<SystemFileCacheInformation>() as u32,
-        )
-    };
-    status == 0
-}
-
-fn flush_modified_page_list() -> bool {
-    issue_memory_list_command(MEMORY_FLUSH_MODIFIED_LIST)
-}
-
-fn apply_system_cleaning(mode: &str, clear_standby_too: bool) -> SystemCleanReport {
-    let mut report = SystemCleanReport::default();
-
-    if mode != "conservative" {
-        (report.system_working_set_cleared, report.system_working_set_freed_bytes) =
-            measure_avail_delta(clear_system_working_sets);
-        (report.system_cache_cleared, report.system_cache_freed_bytes) =
-            measure_avail_delta(clear_system_file_cache);
-    }
-
-    if mode == "aggressive" {
-        (report.modified_page_list_cleared, report.modified_page_list_freed_bytes) =
-            measure_avail_delta(flush_modified_page_list);
-    }
-
-    if clear_standby_too || mode == "aggressive" {
-        (report.standby_cleared, report.standby_freed_bytes) =
-            measure_avail_delta(|| issue_memory_list_command(MEMORY_PURGE_STANDBY_LIST));
-    }
-
-    report
+fn apply_system_cleaning(mode: &str, clear_standby_too: bool) -> winmem::SystemCleanReport {
+    winmem::apply_system_cleaning(mode, clear_standby_too)
 }
 
 #[pyfunction]
 fn clear_standby() -> bool {
-    issue_memory_list_command(MEMORY_PURGE_STANDBY_LIST)
+    winmem::clear_standby()
 }
 
 // ----- 模块初始化 ---------------------------------------------------------

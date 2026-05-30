@@ -224,6 +224,7 @@ class ProcessesPage(ctk.CTkFrame):
         self._total_mem: int = 1
         self._last_fetch = 0.0
         self._fetch_lock = threading.Lock()
+        self._fetch_generation = 0
         self._sort_key: SortKey = "ws"
         self._sort_desc: bool = True
         self._header_buttons: dict[SortKey, ctk.CTkButton] = {}
@@ -565,6 +566,8 @@ class ProcessesPage(ctk.CTkFrame):
     def _fetch_async(self) -> None:
         if not self._fetch_lock.acquire(blocking=False):
             return
+        self._fetch_generation += 1
+        generation = self._fetch_generation
 
         def work():
             try:
@@ -575,7 +578,10 @@ class ProcessesPage(ctk.CTkFrame):
                 except Exception:
                     pass
                 procs = []
-            scheduled = self._app.safe_after(0, lambda p=procs: self._on_fetched(p))
+            scheduled = self._app.safe_after(
+                0,
+                lambda p=procs, gen=generation: self._on_fetched(p, gen),
+            )
             if scheduled is None:
                 try:
                     self._fetch_lock.release()
@@ -584,8 +590,10 @@ class ProcessesPage(ctk.CTkFrame):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_fetched(self, procs: List[dict]) -> None:
+    def _on_fetched(self, procs: List[dict], generation: int) -> None:
         try:
+            if generation != self._fetch_generation:
+                return
             normalized = [self._normalize_proc(p) for p in procs]
             self._procs = [p for p in normalized if p is not None]
             self._has_data = True

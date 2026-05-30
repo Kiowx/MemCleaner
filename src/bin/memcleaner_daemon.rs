@@ -15,23 +15,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM, LRESULT, LUID, POINT, WPARAM};
-use windows::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
-};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::ProcessStatus::{
-    EmptyWorkingSet, GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-use windows::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
-};
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::Shell::{
     IsUserAnAdmin, Shell_NotifyIconW, ShellExecuteW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NIM_MODIFY,
@@ -49,6 +39,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 #[path = "../cleaning.rs"]
 mod cleaning;
+#[path = "../winmem.rs"]
+mod winmem;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const ID_SHOW: usize = 1001;
@@ -58,27 +50,8 @@ const TRAY_UID: u32 = 1;
 const LOG_MAX_BYTES: u64 = 512 * 1024;
 const LOW_YIELD_FREED_BYTES: u64 = 64 * 1024 * 1024;
 const LOW_YIELD_COOLDOWN_MULTIPLIER: u64 = 3;
-const SYSTEM_MEMORY_LIST_INFORMATION_CLASS: i32 = 80;
-const SYSTEM_FILE_CACHE_INFORMATION_EX_CLASS: i32 = 81;
-const MEMORY_EMPTY_WORKING_SETS: u32 = 2;
-const MEMORY_FLUSH_MODIFIED_LIST: u32 = 3;
-const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
-
-#[repr(C)]
-#[derive(Default)]
-struct SystemFileCacheInformation {
-    current_size: usize,
-    peak_size: usize,
-    page_fault_count: u32,
-    minimum_working_set: usize,
-    maximum_working_set: usize,
-    current_size_including_transition_in_pages: usize,
-    peak_size_including_transition_in_pages: usize,
-    transition_repurpose_count: u32,
-    flags: u32,
-}
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -242,57 +215,8 @@ fn memory_pressure_high(percent: f64, avail: u64, total: u64, threshold: u64) ->
     cleaning::memory_pressure_high(percent, avail, total, threshold)
 }
 
-fn enable_privilege(name: &str) -> bool {
-    unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut token,
-        )
-        .is_err()
-        {
-            return false;
-        }
-        let token = OwnedHandle(token);
-        let mut wide_name: Vec<u16> = name.encode_utf16().collect();
-        wide_name.push(0);
-        let mut luid = LUID::default();
-        if LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide_name.as_ptr()), &mut luid).is_err() {
-            return false;
-        }
-        let privileges = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        AdjustTokenPrivileges(token.0, false, Some(&privileges), 0, None, None).is_ok()
-    }
-}
-
-fn trim_pid(pid: u32) -> bool {
-    unsafe {
-        let Ok(handle) = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return false;
-        };
-        let handle = OwnedHandle(handle);
-        EmptyWorkingSet(handle.0).is_ok()
-    }
-}
-
 fn working_set_for(pid: u32) -> Option<u64> {
-    unsafe {
-        let handle = OwnedHandle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?);
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        if GetProcessMemoryInfo(handle.0, &mut counters, size).is_ok() {
-            Some(counters.WorkingSetSize as u64)
-        } else {
-            None
-        }
-    }
+    winmem::working_set_for(pid)
 }
 
 fn normalize_process_name(name: &str) -> String {
@@ -328,27 +252,6 @@ struct CleanSummary {
     protected_skipped: u64,
     process_freed: u64,
     top_freed: Vec<(String, u64)>,
-}
-
-#[derive(Default)]
-struct SystemCleanSummary {
-    system_working_set_cleared: bool,
-    system_working_set_freed_bytes: u64,
-    system_cache_cleared: bool,
-    system_cache_freed_bytes: u64,
-    modified_page_list_cleared: bool,
-    modified_page_list_freed_bytes: u64,
-    standby_cleared: bool,
-    standby_freed_bytes: u64,
-}
-
-impl SystemCleanSummary {
-    fn total_freed(&self) -> u64 {
-        self.system_working_set_freed_bytes
-            .saturating_add(self.system_cache_freed_bytes)
-            .saturating_add(self.modified_page_list_freed_bytes)
-            .saturating_add(self.standby_freed_bytes)
-    }
 }
 
 fn trim_all(cfg: &Config) -> CleanSummary {
@@ -390,13 +293,18 @@ fn trim_all(cfg: &Config) -> CleanSummary {
                         summary.protected_skipped += 1;
                     } else {
                         let before_ws = working_set_for(pid).unwrap_or(0);
-                        if before_ws >= min_ws && trim_pid(pid) {
-                            let after_ws = working_set_for(pid).unwrap_or(before_ws);
-                            let freed = before_ws.saturating_sub(after_ws);
+                        if before_ws >= min_ws {
+                            let Some(report) = winmem::trim_process_report(pid) else {
+                                continue;
+                            };
+                            if !report.success {
+                                continue;
+                            }
                             summary.trimmed += 1;
-                            summary.process_freed = summary.process_freed.saturating_add(freed);
-                            if freed > 0 {
-                                summary.top_freed.push((display_name, freed));
+                            summary.process_freed =
+                                summary.process_freed.saturating_add(report.freed_ws);
+                            if report.freed_ws > 0 {
+                                summary.top_freed.push((display_name, report.freed_ws));
                             }
                         }
                     }
@@ -412,110 +320,12 @@ fn trim_all(cfg: &Config) -> CleanSummary {
     summary
 }
 
-#[allow(non_snake_case)]
-type NtSetSystemInformationFn = unsafe extern "system" fn(
-    SystemInformationClass: i32,
-    SystemInformation: *mut core::ffi::c_void,
-    SystemInformationLength: u32,
-) -> i32;
-
-fn nt_set_system_information() -> Option<NtSetSystemInformationFn> {
-    unsafe {
-        let module = GetModuleHandleW(w!("ntdll.dll")).ok()?;
-        let proc = GetProcAddress(
-            module,
-            windows::core::PCSTR(c"NtSetSystemInformation".as_ptr().cast()),
-        )?;
-        Some(std::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
-            NtSetSystemInformationFn,
-        >(proc))
-    }
-}
-
 fn current_avail_bytes() -> u64 {
-    current_memory_usage()
-        .map(|(used, total)| total.saturating_sub(used))
-        .unwrap_or(0)
+    winmem::avail_bytes()
 }
 
-fn measure_avail_delta(action: impl FnOnce() -> bool) -> (bool, u64) {
-    let before = current_avail_bytes();
-    let ok = action();
-    if !ok {
-        return (false, 0);
-    }
-    let after = current_avail_bytes();
-    (true, after.saturating_sub(before))
-}
-
-fn issue_memory_list_command(command: u32) -> bool {
-    let _ = enable_privilege("SeProfileSingleProcessPrivilege");
-    unsafe {
-        let Some(f) = nt_set_system_information() else {
-            return false;
-        };
-        let mut command = command;
-        f(
-            SYSTEM_MEMORY_LIST_INFORMATION_CLASS,
-            &mut command as *mut u32 as *mut _,
-            size_of::<u32>() as u32,
-        ) == 0
-    }
-}
-
-fn clear_system_working_sets() -> bool {
-    issue_memory_list_command(MEMORY_EMPTY_WORKING_SETS)
-}
-
-fn clear_system_file_cache() -> bool {
-    let _ = enable_privilege("SeIncreaseQuotaPrivilege");
-    unsafe {
-        let Some(f) = nt_set_system_information() else {
-            return false;
-        };
-        let mut info = SystemFileCacheInformation {
-            minimum_working_set: usize::MAX,
-            maximum_working_set: usize::MAX,
-            ..Default::default()
-        };
-        f(
-            SYSTEM_FILE_CACHE_INFORMATION_EX_CLASS,
-            &mut info as *mut SystemFileCacheInformation as *mut _,
-            size_of::<SystemFileCacheInformation>() as u32,
-        ) == 0
-    }
-}
-
-fn flush_modified_page_list() -> bool {
-    issue_memory_list_command(MEMORY_FLUSH_MODIFIED_LIST)
-}
-
-fn clear_standby() -> bool {
-    issue_memory_list_command(MEMORY_PURGE_STANDBY_LIST)
-}
-
-fn apply_system_cleaning(cfg: &Config) -> SystemCleanSummary {
-    let mut summary = SystemCleanSummary::default();
-
-    if cfg.cleaning_mode != "conservative" {
-        (summary.system_working_set_cleared, summary.system_working_set_freed_bytes) =
-            measure_avail_delta(clear_system_working_sets);
-        (summary.system_cache_cleared, summary.system_cache_freed_bytes) =
-            measure_avail_delta(clear_system_file_cache);
-    }
-
-    if cfg.cleaning_mode == "aggressive" {
-        (summary.modified_page_list_cleared, summary.modified_page_list_freed_bytes) =
-            measure_avail_delta(flush_modified_page_list);
-    }
-
-    if cfg.clear_standby_too || cfg.cleaning_mode == "aggressive" {
-        (summary.standby_cleared, summary.standby_freed_bytes) =
-            measure_avail_delta(clear_standby);
-    }
-
-    summary
+fn apply_system_cleaning(cfg: &Config) -> winmem::SystemCleanReport {
+    winmem::apply_system_cleaning(&cfg.cleaning_mode, cfg.clear_standby_too)
 }
 
 struct CleanOutcome {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import asdict, dataclass
@@ -17,6 +18,7 @@ def _config_dir() -> Path:
 
 
 CONFIG_PATH = _config_dir() / "config.json"
+LOGGER = logging.getLogger("memcleaner.config")
 
 
 @dataclass
@@ -128,13 +130,18 @@ class Config:
                 encoding="utf-8",
             )
             os.replace(str(tmp), str(CONFIG_PATH))
-        except OSError:
+        except OSError as exc:
+            LOGGER.warning("atomic config save failed; falling back to direct write", exc_info=exc)
             # 如果替换失败，则回退为直接写入
             try:
                 tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            CONFIG_PATH.write_text(
-                json.dumps(asdict(self), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            except OSError as cleanup_exc:
+                LOGGER.debug("failed to remove temporary config file", exc_info=cleanup_exc)
+            try:
+                CONFIG_PATH.write_text(
+                    json.dumps(asdict(self), indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError as fallback_exc:
+                LOGGER.error("direct config save failed", exc_info=fallback_exc)
+                raise

@@ -95,3 +95,49 @@ pub fn memory_pressure_high(percent: f64, avail: u64, total: u64, threshold: u64
     let floor = available_floor(total);
     percent >= threshold as f64 || avail <= floor
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cleaning_mode_min_ws, memory_pressure_high, parse_excluded_names,
+        protected_names_for_mode,
+    };
+
+    #[test]
+    fn excluded_names_include_exe_aliases() {
+        let names = parse_excluded_names("Code, explorer.exe, ,PWSh");
+        assert!(names.contains("code"));
+        assert!(names.contains("code.exe"));
+        assert!(names.contains("explorer.exe"));
+        assert!(names.contains("pwsh"));
+        assert!(names.contains("pwsh.exe"));
+    }
+
+    #[test]
+    fn aggressive_mode_removes_comfort_protection() {
+        let balanced = protected_names_for_mode("balanced");
+        let aggressive = protected_names_for_mode("aggressive");
+        assert!(balanced.contains("explorer.exe"));
+        assert!(!aggressive.contains("explorer.exe"));
+        assert!(aggressive.contains("lsass.exe"));
+    }
+
+    #[test]
+    fn cleaning_modes_have_expected_minimum_working_sets() {
+        let mib = 1024_u64 * 1024;
+        assert_eq!(cleaning_mode_min_ws("conservative"), 512 * mib);
+        assert_eq!(cleaning_mode_min_ws("balanced"), 192 * mib);
+        assert_eq!(cleaning_mode_min_ws("aggressive"), 64 * mib);
+        assert_eq!(cleaning_mode_min_ws("unknown"), 192 * mib);
+    }
+
+    #[test]
+    fn memory_pressure_uses_percent_or_available_floor() {
+        let total = 16_u64 * 1024 * 1024 * 1024;
+        let healthy_avail = 4_u64 * 1024 * 1024 * 1024;
+        let low_avail = 512_u64 * 1024 * 1024 - 1;
+        assert!(memory_pressure_high(80.0, healthy_avail, total, 80));
+        assert!(!memory_pressure_high(79.9, healthy_avail, total, 80));
+        assert!(memory_pressure_high(40.0, low_avail, total, 80));
+    }
+}

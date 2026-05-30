@@ -10,6 +10,7 @@ from typing import List, Optional
 from . import _core
 from .config import Config
 from .monitor import Monitor
+from .scheduling import available_floor, memory_pressure_high
 
 
 
@@ -48,8 +49,10 @@ class Scheduler:
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         self._stop.set()
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=timeout)
 
     def update_config(self, config: Config) -> None:
         self._config = config
@@ -98,7 +101,7 @@ class Scheduler:
                     self.DEFAULT_THRESHOLD_COOLDOWN_SECONDS,
                 )),
             )
-            pressure_high = bool(stats and self._memory_pressure_high(stats, threshold))
+            pressure_high = bool(stats and memory_pressure_high(stats, threshold))
             if pressure_high:
                 if self._threshold_high_since is None:
                     self._threshold_high_since = now
@@ -162,14 +165,7 @@ class Scheduler:
 
     @staticmethod
     def _available_floor(total_bytes: int) -> int:
-        gib = 1024 * 1024 * 1024
-        return max(512 * 1024 * 1024, min(2 * gib, int(total_bytes * 0.08)))
+        return available_floor(total_bytes)
 
     def _memory_pressure_high(self, stats: dict, threshold: int) -> bool:
-        percent = float(stats.get("percent", 0.0))
-        total = int(stats.get("total", 0) or 0)
-        avail = int(stats.get("avail", 0) or 0)
-        if total <= 0:
-            return percent >= threshold
-        floor = self._available_floor(total)
-        return percent >= threshold or avail <= floor
+        return memory_pressure_high(stats, threshold)

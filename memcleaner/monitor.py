@@ -30,8 +30,10 @@ class Monitor:
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 1.5) -> None:
         self._stop.set()
+        if self._thread.is_alive() and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
         while not self._stop.is_set():

@@ -24,6 +24,7 @@ from .config import CONFIG_PATH, Config
 from .i18n import t, tn, set_language
 from .monitor import Monitor
 from .scheduler import Scheduler
+from .toast import Toast
 
 
 # ---------- HiDPI ---------------------------------------------------------
@@ -93,103 +94,6 @@ def _file_digest(path: Path) -> Optional[str]:
         return digest.hexdigest()
     except OSError:
         return None
-
-
-# ---------- Toast（#1：堆叠，#12：i18n）----------------------------------
-
-
-class _ToastManager:
-    """跟踪当前 Toast，让新 Toast 堆叠在已有 Toast 上方。"""
-
-    def __init__(self) -> None:
-        self._active: list[int] = []  # 相对于父容器的 y 坐标
-
-    def push(self, y: int) -> None:
-        self._active.append(y)
-
-    def pop(self, y: int) -> None:
-        try:
-            self._active.remove(y)
-        except ValueError:
-            pass
-
-    def next_y(self, parent_h: int, toast_h: int, base_y: int = 20) -> int:
-        """计算下一个 Toast 的 y 坐标，避免重叠。"""
-        base = base_y
-        for existing_y in self._active:
-            if abs(base - existing_y) < toast_h + 8:
-                base = existing_y + toast_h + 8
-        return max(12, min(base, max(12, parent_h - toast_h - 20)))
-
-
-_toast_mgr = _ToastManager()
-
-
-class Toast(ctk.CTkFrame):
-    """会自动消失的应用内通知，并在同级通知上方堆叠。"""
-
-    _DURATIONS = {"info": 2400, "warn": 3500, "error": 4500}
-
-    def __init__(self, parent: ctk.CTkFrame, text_: str, kind: str = "info") -> None:
-        super().__init__(parent)
-        self._destroyed = False
-        parent.update_idletasks()
-        self.configure(
-            fg_color=T.SURFACE_2,
-            corner_radius=10,
-            border_width=1,
-            border_color=T.DIVIDER,
-        )
-
-        if kind == "warn":
-            dot_color = T.WARN
-        elif kind == "error":
-            dot_color = T.DANGER
-        else:
-            dot_color = T.ACCENT
-
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(padx=14, pady=10)
-
-        # 使用彩色圆点指示状态，而不是左侧竖条
-        dot = ctk.CTkFrame(row, fg_color=dot_color, width=8, height=8, corner_radius=4)
-        dot.pack(side="left", padx=(0, 10), pady=2)
-        ctk.CTkLabel(
-            row, text=text_,
-            text_color=T.TEXT, font=(T.FONT_FAMILY, 12),
-            wraplength=max(220, min(520, parent.winfo_width() - 96)),
-            justify="left",
-        ).pack(side="left")
-
-        # 所有子控件都支持点击关闭
-        for w in (self, row, dot):
-            w.bind("<Button-1>", lambda _e: self._destroy())
-        for child in row.winfo_children():
-            child.bind("<Button-1>", lambda _e: self._destroy())
-
-        self.update_idletasks()
-        h = self.winfo_height()
-        ph = parent.winfo_height()
-        y_rel = _toast_mgr.next_y(ph, h, base_y=max(48, int(ph * 0.05)))
-        _toast_mgr.push(y_rel)
-        self._toast_y = y_rel
-        self.place(relx=0.5, y=y_rel, anchor="n")
-        self.lift()
-        self._schedule_destroy(kind)
-
-    def _schedule_destroy(self, kind: str) -> None:
-        ms = self._DURATIONS.get(kind, 2400)
-        self.after(ms, self._destroy)
-
-    def _destroy(self) -> None:
-        if self._destroyed:
-            return
-        self._destroyed = True
-        _toast_mgr.pop(self._toast_y)
-        try:
-            self.destroy()
-        except tk.TclError:
-            pass
 
 
 # ---------- 侧边栏导航 ----------------------------------------------------
@@ -1386,7 +1290,8 @@ def main() -> None:
         msgbox.showerror(
             "MemCleaner",
             f"Native module failed to load.\n\n{_core_error}\n\n"
-            "Run `maturin develop --release` from the project root.",
+            "Run `cargo build --release --lib`, then copy "
+            "`target\\release\\_core.dll` to `memcleaner\\_core.pyd`.",
         )
         sys.exit(1)
     cfg = Config.load()
